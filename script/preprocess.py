@@ -4,7 +4,7 @@ import shutil
 from multiprocessing import Pool
 
 from dataset import write_encoded_sentence
-from dataset_utils import find_offsets, get_offset_file, get_index_file
+from dataset.dataset_utils import find_offsets, get_offset_file, get_index_file
 from dictionary import Dictionary
 from options import add_preprocess_args
 

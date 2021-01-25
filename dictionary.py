@@ -14,6 +14,7 @@ class Dictionary(object):
 
     def __init__(self, symbol_count, bos='<s>', eos='</s>', unk='<unk>', pad='<pad>'):
         self.symbol_counts = symbol_count
+        self.num_dict = len(symbol_count)
         self.bos = bos
         self.eos = eos
         self.unk = unk
@@ -21,16 +22,24 @@ class Dictionary(object):
         self.special_symbols = [self.bos, self.eos, self.unk, self.pad]
         self.n_special = len(self.special_symbols)
 
-        self.token2idx = self.build_dict()
+        self.token2idx = self._build_dict()
 
     def add_symbol(self, symbol):
         self.symbol_counts[symbol] += 1
 
     @property
-    def pad_idx(self):
+    def padding_idx(self):
         return self.token2idx[self.pad]
 
-    def build_dict(self):
+    @property
+    def bos_idx(self):
+        return self.token2idx[self.bos]
+
+    @property
+    def token_num(self):
+        return len(self.token2idx)
+
+    def _build_dict(self):
         token2idx = {}
         for i, symbol in enumerate(self.special_symbols):
             token2idx[symbol] = len(token2idx)
@@ -79,6 +88,9 @@ class Dictionary(object):
                 line = line.strip().split()
                 token2idx[line[0]] = int(line[1])
         return cls(token2idx)
+
+    def __len__(self):
+        return self.num_dict
 
 
 

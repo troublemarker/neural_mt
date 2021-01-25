@@ -2,10 +2,10 @@
 <project version="4">
   <component name="PublishConfigData">
     <serverData>
-      <paths name="wangning@172.16.185.70:22">
+      <paths name="wangning@172.16.185.70:22 password">
         <serverdata>
           <mappings>
-            <mapping local="$PROJECT_DIR$" web="/" />
+            <mapping deploy="/home/Extra/wangning/nmt" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

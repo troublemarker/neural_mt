@@ -3,6 +3,23 @@ import os
 import torch
 
 
+def collate_tokens(samples, padding_idx, bos_idx, insert_bos_to_beginning=False):
+    max_len = max([sample.size() for sample in samples])
+    collated_batches = torch.zeros([len(samples), max_len]) * padding_idx
+
+    for i, sample in enumerate(samples):
+        collated_batches[i, :len(sample)] = sample
+        if insert_bos_to_beginning:
+            collated_batches[i, 1:len(sample)] = sample[:-1]
+        else:
+            collated_batches[i, :len(sample)] = sample
+
+    if insert_bos_to_beginning:
+        collated_batches[:, 0] = bos_idx
+
+    return collated_batches
+
+
 def get_index_file(base_dir, num=0):
     return os.path.join(base_dir, "%d_index.bin" % num)
 
@@ -36,9 +53,11 @@ def find_offsets(filename, chunks):
     return offsets
 
 
-def collate(samples):
-    max_length = max([sample.size() for sample in samples])
-    padding_samples = torch.zeros((len(samples), max_length[0]), dtype=torch.int32)
-    for idx, sample in enumerate(samples):
-        padding_samples[idx][:len(sample)].copy_(sample)
-    return padding_samples
+def infer_language_pair(path):
+    for filename in os.listdir(path):
+        parts = filename.split('.')
+        if len(parts) >= 3 and len(parts[1].split('-')) == 2:
+            return parts[1].split('-')
+
+
+

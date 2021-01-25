@@ -1,0 +1,187 @@
+# 数据流程是这样的，自己定义好dataset类，继承自torch.utils.data.Dataset，重写__getitem__，collater，
+# 将自己定义的dataset，batch_sampler，collater传递给DataLoader，DataLoader负责每次从batch_sampler
+# 取一个batch，该batch里是index，将Dataset里取出batch里的所有数据放入一个列表里返回，交给collater处理
+
+# 1 用多进程将语料库分块读取并编码，编码后的二进制数据和每个句子的大小（token数）存起来，最后再合并成一个文件
+#   至此，语料库的预处理就算完成了
+# 2 训练数据的加载：要使用的接口是Dataset和Dataloader，继承自Dataset的类必须提供__getitem__方法，输入
+#   为index，返回可以是任何数据；将Dataset对象传给Dataloader，Dataloader还需要batch_sampler和collate
+#   Dataloader调用过程为：从每个batch_sampler里拿出一个batch，从dataset里拿出来一个batch里的数据，返回
+#   的是samples，传递给collate函数。
+# 3 需要做的是：在Dataset的初始化方法里把数据加载进来，并把编码后的数据，偏移量和大小放入一个列表里，以便在
+#   __getitem__方法里把对应的数据取出来。需要单独处理batch_sampler，将句子的序号先按目标句子长度排序，再按
+#   源句子长度排序，返回序号。对每个序号开始循环，取目标句子和源句子长度的最大值，累计总token数不超过max_token
+#   放入同一个batch里，这样就把数据打包了。
+# 4 接下来需要写collate，collate是负责把数据padding到固定长度，然后生成真正的训练数据
+# 5 应该尽量简化所有的步骤
+
+# 自己定义的模型要在初始化方法里定义，然后定义forward方法，如果不在初始化方法里定义模型会怎么样
+
+# 坑和疑问，required_batch_size_multiple=8是什么要求？
+# num_shards, shard_id是怎么来的，又是如何分配给不同的gpu的
+# 多进程跟GPU个数没关系吗？set device
+# 如果元素耗尽了，下一个epoch怎么开始的？
+# 多个结果又是如何合并的？剃度合并应该是先同步吧
+# progress到底包装了多少batch
+# 梯度到底什么时候算？命令行参数里更新次数等参数意义
+# 每个进程里的梯度
+
+
+记录训练时间，并行梯度计算，学习率设置跟损失有什么关系，
+
+c10d full name maybe caffe tensor distributed, c stands for the first letter of caffe, 10 stands for the
+first three letters ten of tensor.
+it's the new shared distributed library for PyTorch and Caffe2 . The main difference between the original
+implementation of DistributedDataParallel and the new c10d one is that the new one overlaps the backwards
+pass with communication.
+也就是说如果在程序的开始部分就使用多进程进行模型训练，然后在每个进程内初始化进程组，推测应该是在每个machine上复制一份进程，
+至于每个进程内部要使用几个GPU就不一定了，c10d会在optimizer.backward(loss)后自动进行梯度通信，保持每个进程内的模型梯度
+同步，
+
+c10d是一个分布式数据通信库，通信方式包括集体通信，collective communication和 点对点通信
+计算参数平均值还是要用c10d的API，这样能够细粒度的控制哪些量需要通信
+
+分布式的训练模型，相当于把一个大的batch数据又分成了minibatch数据训练，如何等价呢？大的batch有个总的损失，再求梯度，
+而每个minibatch有自己的损失，求出各自的梯度
+
+随机梯度下降和梯度下降
+两个极端：随机梯度下降是单一样本拟合模型的误差对参数求梯度，那每次模型参数会走一步去拟合单一样本
+而梯度下降是所有样本拟合模型的误差对参数求梯度，其中误差是每个样本误差的求和，梯度也是所有单一样本的梯度和，
+那每次模型参数会走一大步去拟合所有样本，而batch梯度下降是折中选择
+
+概念真多：节点就是机器数量，world size指所有的进程数，local world size指在每个节点上的进程数，而每个进程用几个
+GPU是不做限制的，但建议是一个进程使用一个GPU。rank指的是进程
+梯度已经取了平均的前提下还乘以进程数除以总token数，乘以进程数意思是这一个大batch内的总梯度，除以每个进程内的token数，
+每个minibatch的梯度。
+
+那轮数又如何定义的？
+
+
+fairseq内的梯度，我认为已经是平均后的结果了，但是其实这样的平均是没有意义的，因为每个GPU上的样本个数根本不一样
+图像 vs sequence
+图像 batch H W C 每个样本的HWC都是一样的
+sequence batch T C 每个样本的尺寸就不一样，为此我们在打包每个batch的时候，每个batch大小也不一样，比如我们要求
+每个batch内的token数最多为4096个，以target句子为准，因为目标句子的每个token才是做分类的每个样本，然后处理的时候
+要补齐。所以每个GPU上的分类样本数就不一样，每个GPU上求出梯度还是有一些差距的，所以求平均没有意义，正确的做法应该是
+求和
+
+把metric搞清楚，args.log_interval之后做了什么操作
+
+2021.1.10 todo list
+1 如何设置最大训练轮数和最大更新次数两种训练方式的矛盾？
+如何设置终止条件，其实以上两种训练方式也算是两种终止方式，这么多的终止条件如何调和？
+
+终止条件方式：最大训练轮数、最大更新次数、最大训练时间、最小学习率、到达patience。
+fairseq选择的方式是：
+2 搞清楚metric
+3 valid如何操作
+max_epoch = args.max_epoch or math.inf
+
+max_update = args.max_update or math.inf
+
+while lr > args.min_lr and epoch_itr.next_epoch_idx <= max_epoch:
+
+
+
+should_stop = (
+        should_stop_early(args, valid_losses[0])
+        or num_updates >= max_update
+        or (
+            args.stop_time_hours > 0
+            and trainer.cumulative_training_time() / (60 * 60) > args.stop_time_hours
+        )
+    )
+
+
+def should_stop_early(args, valid_loss):
+    # skip check if no validation was done in the current epoch
+    if valid_loss is None:
+        return False
+    if args.patience <= 0:
+        return False
+
+    def is_better(a, b):
+        return a > b if args.maximize_best_checkpoint_metric else a < b
+
+    prev_best = getattr(should_stop_early, "best", None)
+    if prev_best is None or is_better(valid_loss, prev_best):
+        should_stop_early.best = valid_loss
+        should_stop_early.num_runs = 0
+        return False
+    else:
+        should_stop_early.num_runs += 1
+        if should_stop_early.num_runs >= args.patience:
+            logger.info(
+                "early stop since valid performance hasn't improved for last {} runs".format(
+                    args.patience
+                )
+            )
+            return True
+        else:
+            return False
+
+2021.1.11
+todo list:
+1 整理上层模块，再把业务流程梳理好，类和方法模块划分、交互定义好，调试测试
+2 把装饰器搞清楚，with语句搞清楚
+
+给某个程序片段加功能，再细化一些，加记录数据功能，要求
+1 能表征出单独的某个程序片段，也就是说记录功能要有自己的标识，自己的列表容器，调用的时候能够表征
+  那就用字典标识，字典套列表，还需要记录到内层的数据，外层用字典记录层次
+2 记录什么数据，每次记录数据就初始化一个对应的对象，放入列表
+  记录三种类型的：计算平均值，计算频率
+
+3 装饰器和上下文管理器
+
+loss nll_loss sample_size
+需求是每一个epoch和每一个train_step都要记录一些数据，train_step是嵌套epoch的内层，内层数据做统计内层统计，每一次train_step做一次统计，
+统计后要归零，而外层一直要做统计直至结束，大概还需要做最外层的从训练开始的某些统计。也就是要设计这么一个类似于插件的功能，装饰器就正好对应着
+这一功能，但是不具备层次感的统计功能。
+
+我昨天的思路是
+1 先把不同的统计统计功能类写好 2 把所有要统计的字段分类型放到不同的列表里 3 遍历每个列表，实例化相应类型的统计类，组成键值对放到字典里
+4 对外层和内层分别再建立字典存放，深浅拷贝。
+
+这样写最严重的缺点是把字段放到列表写死了，对于每一层都要建立所有字段，不能灵活的选择建立字段统计。
+要实现的功能是在当前层次每添加一个字段，则这个字段其所有外层次都加上，当然也可以有选择的添加是否建立新的层次结构。
+草，fairseq对这一功能模式设计的真好，这也太屌了，我真是个low逼啊
+它把这个层层加字段的功能理解为数据结构中的栈，每一层都存放
+
+
+问题：
+每次要保存前面 [batch_size beam_size current_seq_len - 1 embedding]的值，每次输入的时候都存上，比如第一次输入起始字符经过
+embedding后就保存起来，每次有新的输入就在seq_len的轴上进行拼接，拿空间换时间。
+每次的损失是不是也要保存，也可以避免
+training时候的decoder和inference阶段的代码要兼容
+beam_size * 2说是怕担心遇到eos字符，遇到EOS字符就会结束一个句子搜索，
+先捋出大体步骤：
+
+建立一个[batch_size beam_size]的数组存放分数
+建立一个[batch_size beam_size]的数组存放已经结束的flag
+建立一个[batch_size beam_size token_index]的数组存放生成的index
+
+从第一个bos字符开始
+输入：[batch_size beam_size]
+1 经过embedding，transformer decoder 输出logits [batch_size beam_size token_score]
+2 对每个batch的每个beam所有token生成的分数进行排序，选出最高的beam_size个[batch_size beam_size beam_size_score]，分别记录其分数
+  和index，加上之前的[batch_size beam_size]存放的分数，[batch_size beam_size beam_size_score]，index也拼上之前的
+  [batch_size beam_size token_index]
+3 在beam轴上进行排序，选出最高的beam_size个token，记录其index
+  具体地，变换成[batch_size beam_size * token_score]数组，排序返回其前beam_size个index，index对token_size取整是beam_index，
+  index对token_size取余是token_index，从[batch_size beam_size beam_size_score]按index选择出来[batch_size beam_size]分数，
+  从[batch_size beam_size token_index]选择出新的句子。
+  检查最后一个token是否为eos，如果是，记录它所在的batch和beam位置，下次再生成
+  下次再生成的时候还可以继续输入模型，但是预测出的[batch_size beam_size token_index]选出最高的beam_size个后，再进行排序就要考虑EOS的
+  情况了，先把EOS位置的分数置为负无穷，而后再进行排序，后面操作同理，
+4 遇到EOS字符的句子，逻辑上剩下beam_size-1个句子继续搜索，排序；至于程序上如何处理再思考。
+5 所有的句子都结束了，将分数最高的句子输出。
+
+
+思想：建立队列，抽象出具体问题，
+问题描述：已经一个树结构，广度优先遍历
+1 建立根节点，入队 2 根节点输入，输出n个子节点 3 对子节点进行排序，找出概率最大的k个入队
+4 再拿出每个节点的子节点进行预测，
+
+
+
+
